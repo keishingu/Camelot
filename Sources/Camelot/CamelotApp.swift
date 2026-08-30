@@ -13,7 +13,7 @@ struct CamelotApp: App {
         .task { model.start() }
     }
 
-    MenuBarExtra("Camelot", systemImage: "keyboard.badge.ellipsis") {
+    MenuBarExtra("Camelot", image: "MenuBarIcon") {
       CamelotMenu(model: model)
     }
   }

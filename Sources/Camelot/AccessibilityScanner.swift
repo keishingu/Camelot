@@ -5,15 +5,19 @@ import Foundation
 
 enum CandidateAction: String, Sendable {
   case press
+  case showMenu
+  case pick
   case focus
+  case click
 }
 
 struct AccessibilityCandidate: Identifiable, @unchecked Sendable {
-  let id: Int
+  var id: Int
   let pid: pid_t
   let role: String
   let subrole: String?
   let frame: CGRect
+  let activationPoint: CGPoint
   let action: CandidateAction
   let element: AXUIElement
   let window: AXUIElement
@@ -40,6 +44,10 @@ final class AccessibilityScanner {
   private static let maximumDuration: TimeInterval = 0.75
   private static let focusableRoles: Set<String> = [
     "AXTextField", "AXTextArea", "AXComboBox", "AXSlider", "AXIncrementor",
+  ]
+  private static let semanticActionRoles: Set<String> = [
+    "AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXMenuItem",
+    "AXPopUpButton", "AXTab", "AXDisclosureTriangle",
   ]
 
   private let queue = DispatchQueue(label: "com.camelot.accessibility-scan")
@@ -71,6 +79,11 @@ final class AccessibilityScanner {
   private func scan(_ request: Request) -> Result<AccessibilityScanResult, ScanError> {
     let startedAt = CFAbsoluteTimeGetCurrent()
     let application = AXUIElementCreateApplication(request.pid)
+    AXUIElementSetAttributeValue(
+      application,
+      "AXManualAccessibility" as CFString,
+      kCFBooleanTrue
+    )
     guard let focusedWindow = elementAttribute(kAXFocusedWindowAttribute, from: application) else {
       return .failure(.noFocusedWindow)
     }
@@ -78,7 +91,7 @@ final class AccessibilityScanner {
     var stack: [(AXUIElement, Int)] = [(focusedWindow, 0)]
     var visitedHashes = Set<CFHashCode>()
     var candidates = [AccessibilityCandidate]()
-    var signatures = Set<String>()
+    var candidateIndexByGeometry = [String: Int]()
     var visitedCount = 0
     var reachedSafetyLimit = false
 
@@ -100,14 +113,20 @@ final class AccessibilityScanner {
         request: request
       ) {
         let signature = [
-          candidate.role,
-          candidate.action.rawValue,
           String(Int(candidate.frame.origin.x.rounded())),
           String(Int(candidate.frame.origin.y.rounded())),
           String(Int(candidate.frame.width.rounded())),
           String(Int(candidate.frame.height.rounded())),
         ].joined(separator: ":")
-        if signatures.insert(signature).inserted {
+        if let existingIndex = candidateIndexByGeometry[signature] {
+          let existing = candidates[existingIndex]
+          if candidatePriority(candidate) <= candidatePriority(existing) {
+            var replacement = candidate
+            replacement.id = existing.id
+            candidates[existingIndex] = replacement
+          }
+        } else {
+          candidateIndexByGeometry[signature] = candidates.count
           candidates.append(candidate)
         }
       }
@@ -154,11 +173,18 @@ final class AccessibilityScanner {
       return nil
     }
 
+    let actions = Set(actionNames(of: element))
     let action: CandidateAction
     if Self.focusableRoles.contains(role), isFocusedAttributeSettable(on: element) {
       action = .focus
-    } else if actionNames(of: element).contains(kAXPressAction as String) {
+    } else if actions.contains(kAXPressAction as String) {
       action = .press
+    } else if actions.contains(kAXShowMenuAction as String) {
+      action = .showMenu
+    } else if actions.contains(kAXPickAction as String) {
+      action = .pick
+    } else if Self.semanticActionRoles.contains(role) {
+      action = .click
     } else {
       return nil
     }
@@ -169,6 +195,7 @@ final class AccessibilityScanner {
       role: role,
       subrole: attribute(kAXSubroleAttribute, from: element) as? String,
       frame: appKitFrame,
+      activationPoint: CGPoint(x: axFrame.midX, y: axFrame.midY),
       action: action,
       element: element,
       window: window
@@ -176,10 +203,24 @@ final class AccessibilityScanner {
   }
 
   private func childElements(of element: AXUIElement) -> [AXUIElement] {
-    if let visible = attribute(kAXVisibleChildrenAttribute, from: element) as? [AXUIElement] {
+    if let visible = attribute(kAXVisibleChildrenAttribute, from: element) as? [AXUIElement],
+      !visible.isEmpty
+    {
       return visible
     }
+    if let navigationOrder = attribute("AXChildrenInNavigationOrder", from: element)
+      as? [AXUIElement], !navigationOrder.isEmpty
+    {
+      return navigationOrder
+    }
     return attribute(kAXChildrenAttribute, from: element) as? [AXUIElement] ?? []
+  }
+
+  private func candidatePriority(_ candidate: AccessibilityCandidate) -> Int {
+    if candidate.action == .focus { return 0 }
+    if Self.semanticActionRoles.contains(candidate.role), candidate.action != .click { return 1 }
+    if candidate.action != .click { return 2 }
+    return 3
   }
 
   private func frame(of element: AXUIElement) -> CGRect? {

@@ -54,6 +54,8 @@ SwiftUI's `glassEffect` APIs.
 - A borderless nonactivating `NSPanel` can display a click-through overlay.
 - Chrome and Safari expose web accessibility trees to macOS accessibility
   clients, subject to the page and browser implementation.
+- Electron may defer construction of Chromium's accessibility tree until an
+  assistive client sets its documented `AXManualAccessibility` attribute.
 
 The raw AX API has no general `AXFrame` attribute. Camelot constructs a frame
 from `AXPosition` and `AXSize`. AX coordinates have a top-left origin and need
@@ -118,6 +120,8 @@ non-sandboxed build with a stable identity. Current options are:
 - Resolve the frontmost process with `NSWorkspace` and scan its focused window.
 - Include attached sheets, dialogs, and menus that are currently visible.
 - Prefer `AXVisibleChildren`, falling back to `AXChildren`.
+- Before scanning, set `AXManualAccessibility = true` best effort. Unsupported
+  native apps ignore it; Electron uses it to expose Chromium descendants.
 - Traverse iteratively with node, depth, and elapsed-time safety budgets.
 - Scan only when Hint Mode starts. Do not poll or retain a cross-session cache.
 - Batch attributes where it reduces AX IPC.

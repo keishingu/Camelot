@@ -21,6 +21,7 @@ final class OverlayWindowController {
       panels[id] = nil
     }
 
+    var keyPanel: HintPanel?
     for screen in screens {
       guard let id = displayID(for: screen) else { continue }
       let panel = panels[id] ?? makePanel(for: screen)
@@ -34,7 +35,9 @@ final class OverlayWindowController {
         rootView: HintOverlayView(items: screenItems, screenFrame: screen.frame)
       )
       panel.orderFrontRegardless()
+      if keyPanel == nil, !screenItems.isEmpty { keyPanel = panel }
     }
+    keyPanel?.makeKey()
   }
 
   func hide() {
@@ -74,7 +77,7 @@ final class OverlayWindowController {
 }
 
 private final class HintPanel: NSPanel {
-  override var canBecomeKey: Bool { false }
+  override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
 }
 

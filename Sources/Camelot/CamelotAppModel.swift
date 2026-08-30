@@ -123,6 +123,12 @@ final class CamelotAppModel: ObservableObject {
       status = "Input Monitoring is required before showing hints"
       return
     }
+    guard !PermissionService.isSecureInputEnabled else {
+      cancelHintSession(
+        message: "Secure Input is active; leave the secure text field and try again"
+      )
+      return
+    }
 
     cancelHintSession(message: nil)
     let generation = scanGeneration
@@ -194,12 +200,12 @@ final class CamelotAppModel: ObservableObject {
     activePrefix = ""
     status = "Executing \(hint.code)…"
 
-    executor.execute(hint.candidate) { [weak self] result in
+    executor.execute(hint.candidate) { [weak self] result, diagnostics in
       switch result {
       case .success:
-        self?.status = "Executed \(hint.code)"
+        self?.status = "Executed \(hint.code) · \(diagnostics)"
       case .failure(let error):
-        self?.status = error.localizedDescription
+        self?.status = "\(error.localizedDescription) · \(diagnostics)"
       }
     }
   }

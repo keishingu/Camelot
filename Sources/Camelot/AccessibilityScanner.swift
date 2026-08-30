@@ -42,12 +42,20 @@ final class AccessibilityScanner {
   private static let maximumNodes = 5_000
   private static let maximumDepth = 50
   private static let maximumDuration: TimeInterval = 0.75
+  static let childAttributePriority = [
+    "AXChildrenInNavigationOrder",
+    kAXVisibleChildrenAttribute,
+    kAXChildrenAttribute,
+  ]
   private static let focusableRoles: Set<String> = [
     "AXTextField", "AXTextArea", "AXComboBox", "AXSlider", "AXIncrementor",
   ]
   private static let semanticActionRoles: Set<String> = [
     "AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXMenuItem",
-    "AXPopUpButton", "AXTab", "AXDisclosureTriangle",
+    "AXPopUpButton", "AXMenuButton", "AXTab", "AXDisclosureTriangle",
+  ]
+  private static let menuPresentationRoles: Set<String> = [
+    "AXPopUpButton", "AXMenuButton",
   ]
 
   private let queue = DispatchQueue(label: "com.camelot.accessibility-scan")
@@ -174,18 +182,12 @@ final class AccessibilityScanner {
     }
 
     let actions = Set(actionNames(of: element))
-    let action: CandidateAction
-    if Self.focusableRoles.contains(role), isFocusedAttributeSettable(on: element) {
-      action = .focus
-    } else if actions.contains(kAXPressAction as String) {
-      action = .press
-    } else if actions.contains(kAXShowMenuAction as String) {
-      action = .showMenu
-    } else if actions.contains(kAXPickAction as String) {
-      action = .pick
-    } else if Self.semanticActionRoles.contains(role) {
-      action = .click
-    } else {
+    guard let action = preferredAction(
+      role: role,
+      actions: actions,
+      canFocus: Self.focusableRoles.contains(role) && isFocusedAttributeSettable(on: element),
+      frame: axFrame
+    ) else {
       return nil
     }
 
@@ -203,24 +205,36 @@ final class AccessibilityScanner {
   }
 
   private func childElements(of element: AXUIElement) -> [AXUIElement] {
-    if let visible = attribute(kAXVisibleChildrenAttribute, from: element) as? [AXUIElement],
-      !visible.isEmpty
-    {
-      return visible
+    for attributeName in Self.childAttributePriority {
+      if let children = attribute(attributeName, from: element) as? [AXUIElement],
+        !children.isEmpty
+      {
+        return children
+      }
     }
-    if let navigationOrder = attribute("AXChildrenInNavigationOrder", from: element)
-      as? [AXUIElement], !navigationOrder.isEmpty
-    {
-      return navigationOrder
-    }
-    return attribute(kAXChildrenAttribute, from: element) as? [AXUIElement] ?? []
+    return []
   }
 
-  private func candidatePriority(_ candidate: AccessibilityCandidate) -> Int {
+  func candidatePriority(_ candidate: AccessibilityCandidate) -> Int {
     if candidate.action == .focus { return 0 }
-    if Self.semanticActionRoles.contains(candidate.role), candidate.action != .click { return 1 }
-    if candidate.action != .click { return 2 }
-    return 3
+    if Self.semanticActionRoles.contains(candidate.role) { return 1 }
+    return 2
+  }
+
+  func preferredAction(
+    role: String,
+    actions: Set<String>,
+    canFocus: Bool,
+    frame: CGRect
+  ) -> CandidateAction? {
+    if Self.focusableRoles.contains(role), canFocus { return .focus }
+    if role == "AXButton", frame.width >= frame.height * 5 { return .click }
+    if actions.contains(kAXPressAction as String) { return .press }
+    if Self.menuPresentationRoles.contains(role), actions.contains(kAXShowMenuAction as String) {
+      return .showMenu
+    }
+    if actions.contains(kAXPickAction as String) { return .pick }
+    return Self.semanticActionRoles.contains(role) ? .click : nil
   }
 
   private func frame(of element: AXUIElement) -> CGRect? {

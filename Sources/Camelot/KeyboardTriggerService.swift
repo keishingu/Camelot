@@ -3,6 +3,100 @@ import CoreGraphics
 import Foundation
 
 final class KeyboardTriggerService {
+  private final class TapRuntime {
+    let tap: CFMachPort
+    let source: CFRunLoopSource
+
+    private let stateLock = NSLock()
+    private let ready = DispatchSemaphore(value: 0)
+    private let stopped = DispatchSemaphore(value: 0)
+    private var runLoop: CFRunLoop?
+    private var stopping = false
+    private var finished = false
+
+    init(tap: CFMachPort, source: CFRunLoopSource) {
+      self.tap = tap
+      self.source = source
+    }
+
+    func start() -> Bool {
+      let thread = Thread { [self] in run() }
+      thread.name = "Camelot keyboard event tap"
+      thread.qualityOfService = .userInteractive
+      thread.start()
+
+      guard ready.wait(timeout: .now() + 1) == .success else { return false }
+      return CGEvent.tapIsEnabled(tap: tap)
+    }
+
+    func stop() {
+      stateLock.lock()
+      guard !finished else {
+        stateLock.unlock()
+        return
+      }
+      stopping = true
+      let runLoop = runLoop
+      stateLock.unlock()
+
+      if let runLoop {
+        CFRunLoopStop(runLoop)
+        CFRunLoopWakeUp(runLoop)
+      }
+      guard stopped.wait(timeout: .now() + 1) != .success else { return }
+      CGEvent.tapEnable(tap: tap, enable: false)
+      CFRunLoopSourceInvalidate(source)
+      CFMachPortInvalidate(tap)
+    }
+
+    private func run() {
+      let runLoop = CFRunLoopGetCurrent()
+      var sourceWasAdded = false
+      defer {
+        CGEvent.tapEnable(tap: tap, enable: false)
+        if sourceWasAdded {
+          CFRunLoopRemoveSource(runLoop, source, .commonModes)
+        }
+        CFRunLoopSourceInvalidate(source)
+        CFMachPortInvalidate(tap)
+        stateLock.lock()
+        self.runLoop = nil
+        finished = true
+        stateLock.unlock()
+        stopped.signal()
+      }
+
+      stateLock.lock()
+      self.runLoop = runLoop
+      let shouldStop = stopping
+      stateLock.unlock()
+
+      guard !shouldStop else {
+        ready.signal()
+        return
+      }
+
+      CFRunLoopAddSource(runLoop, source, .commonModes)
+      sourceWasAdded = true
+      CGEvent.tapEnable(tap: tap, enable: true)
+      ready.signal()
+      CFRunLoopRun()
+    }
+  }
+
+  private enum Notification {
+    case optionTap
+    case hintCharacter(Character)
+    case backspace
+    case cancel
+  }
+
+  private struct EventDecision {
+    let consume: Bool
+    var notification: Notification?
+    var reenableTap = false
+  }
+
   private static let leftOption: CGKeyCode = 58
   private static let rightOption: CGKeyCode = 61
   private static let escape: CGKeyCode = 53
@@ -19,17 +113,27 @@ final class KeyboardTriggerService {
   var onBackspace: (() -> Void)?
   var onCancel: (() -> Void)?
 
-  private var eventTap: CFMachPort?
-  private var runLoopSource: CFRunLoopSource?
+  private let lifecycleLock = NSLock()
+  private let runtimeLock = NSLock()
+  private let inputStateLock = NSLock()
+  private var runtime: TapRuntime?
   private var tapDetector = OptionTapDetector()
   private var hintModeActive = false
   private var suppressedKeyCodes = Set<CGKeyCode>()
 
-  var isRunning: Bool { eventTap != nil }
+  var isRunning: Bool {
+    runtimeLock.lock()
+    let runtime = runtime
+    runtimeLock.unlock()
+    return runtime.map { CGEvent.tapIsEnabled(tap: $0.tap) } ?? false
+  }
 
   @discardableResult
   func start() -> Bool {
-    stop()
+    lifecycleLock.lock()
+    defer { lifecycleLock.unlock() }
+    stopRuntime()
+    resetInputState()
 
     let eventMask = [
       CGEventType.flagsChanged,
@@ -70,97 +174,156 @@ final class KeyboardTriggerService {
       return false
     }
 
-    self.eventTap = eventTap
-    runLoopSource = source
-    CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-    CGEvent.tapEnable(tap: eventTap, enable: true)
+    let runtime = TapRuntime(tap: eventTap, source: source)
+    runtimeLock.lock()
+    self.runtime = runtime
+    runtimeLock.unlock()
+    guard runtime.start() else {
+      runtimeLock.lock()
+      if self.runtime === runtime { self.runtime = nil }
+      runtimeLock.unlock()
+      runtime.stop()
+      return false
+    }
     return true
   }
 
   func stop() {
-    hintModeActive = false
-    suppressedKeyCodes.removeAll()
-    tapDetector.cancel()
-    if let runLoopSource {
-      CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-      CFRunLoopSourceInvalidate(runLoopSource)
-    }
-    if let eventTap {
-      CGEvent.tapEnable(tap: eventTap, enable: false)
-      CFMachPortInvalidate(eventTap)
-    }
-    runLoopSource = nil
-    eventTap = nil
+    lifecycleLock.lock()
+    defer { lifecycleLock.unlock() }
+    stopRuntime()
+    resetInputState()
   }
 
   func setHintModeActive(_ active: Bool) {
+    inputStateLock.lock()
+    defer { inputStateLock.unlock() }
+    setHintModeActiveLocked(active)
+  }
+
+  private func setHintModeActiveLocked(_ active: Bool) {
     hintModeActive = active
     if active { suppressedKeyCodes.removeAll() }
     tapDetector.cancel()
   }
 
-  private func handle(_ type: CGEventType, event: CGEvent) -> Bool {
-    if type == .keyUp {
-      let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-      if suppressedKeyCodes.remove(keyCode) != nil { return true }
-    }
+  func handle(_ type: CGEventType, event: CGEvent) -> Bool {
+    inputStateLock.lock()
+    let decision = decide(type, event: event)
+    inputStateLock.unlock()
 
+    if decision.reenableTap {
+      runtimeLock.lock()
+      let tap = runtime?.tap
+      runtimeLock.unlock()
+      if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+    }
+    deliver(decision.notification)
+    return decision.consume
+  }
+
+  private func decide(_ type: CGEventType, event: CGEvent) -> EventDecision {
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
       let wasActive = hintModeActive
-      setHintModeActive(false)
-      if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
-      if wasActive { onCancel?() }
-      return false
+      setHintModeActiveLocked(false)
+      return EventDecision(
+        consume: false,
+        notification: wasActive ? .cancel : nil,
+        reenableTap: true
+      )
+    }
+
+    if type == .keyUp {
+      let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+      if suppressedKeyCodes.remove(keyCode) != nil {
+        return EventDecision(consume: true)
+      }
     }
 
     if hintModeActive {
-      return handleHintMode(type, event: event)
+      return decideHintMode(type, event: event)
     }
 
     guard type == .flagsChanged else {
       tapDetector.cancel()
-      return false
+      return EventDecision(consume: false)
     }
 
     let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
     guard keyCode == Self.leftOption || keyCode == Self.rightOption else {
       tapDetector.cancel()
-      return false
+      return EventDecision(consume: false)
     }
 
     let isDown = event.flags.contains(.maskAlternate)
     let optionKey: OptionTapDetector.Key = keyCode == Self.leftOption ? .left : .right
     if tapDetector.optionChanged(optionKey, isDown: isDown, timestamp: event.timestamp) {
-      onOptionTap?()
+      return EventDecision(consume: false, notification: .optionTap)
     }
-    return false
+    return EventDecision(consume: false)
   }
 
-  private func handleHintMode(_ type: CGEventType, event: CGEvent) -> Bool {
+  private func decideHintMode(_ type: CGEventType, event: CGEvent) -> EventDecision {
     if [.leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel].contains(type) {
-      setHintModeActive(false)
-      onCancel?()
-      return false
+      setHintModeActiveLocked(false)
+      return EventDecision(consume: false, notification: .cancel)
     }
 
-    guard type == .keyDown || type == .keyUp else { return false }
+    guard type == .keyDown || type == .keyUp else {
+      return EventDecision(consume: false)
+    }
     let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
     if type == .keyUp {
-      return suppressedKeyCodes.remove(keyCode) != nil
+      return EventDecision(consume: suppressedKeyCodes.remove(keyCode) != nil)
     }
 
     suppressedKeyCodes.insert(keyCode)
-    if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return true }
-    if keyCode == Self.escape {
-      setHintModeActive(false)
-      onCancel?()
-    } else if keyCode == Self.delete {
-      onBackspace?()
-    } else if let character = Self.hintCharacters[keyCode] {
-      onHintCharacter?(character)
+    if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+      return EventDecision(consume: true)
     }
-    return true
+    if keyCode == Self.escape {
+      setHintModeActiveLocked(false)
+      return EventDecision(consume: true, notification: .cancel)
+    } else if keyCode == Self.delete {
+      return EventDecision(consume: true, notification: .backspace)
+    } else if let character = Self.hintCharacters[keyCode] {
+      return EventDecision(consume: true, notification: .hintCharacter(character))
+    }
+    return EventDecision(consume: true)
+  }
+
+  private func deliver(_ notification: Notification?) {
+    guard let notification else { return }
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      switch notification {
+      case .optionTap:
+        onOptionTap?()
+      case .hintCharacter(let character):
+        onHintCharacter?(character)
+      case .backspace:
+        onBackspace?()
+      case .cancel:
+        onCancel?()
+      }
+    }
+  }
+
+  private func stopRuntime() {
+    runtimeLock.lock()
+    let runtime = runtime
+    self.runtime = nil
+    runtimeLock.unlock()
+    runtime?.stop()
+  }
+
+  private func resetInputState() {
+    inputStateLock.lock()
+    hintModeActive = false
+    suppressedKeyCodes.removeAll()
+    tapDetector.cancel()
+    inputStateLock.unlock()
   }
 
   deinit {

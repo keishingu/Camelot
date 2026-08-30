@@ -86,7 +86,9 @@ cannot be sandboxed. Rinvio also received an App Review rejection for its Input
 Monitoring and Accessibility use.
 
 No distribution channel is permanently selected yet. Technical spikes use a
-non-sandboxed build with a stable identity. Current options are:
+non-sandboxed build with a stable identity. The local build script automatically
+uses an available Apple Development certificate so TCC permissions survive
+rebuilds; ad-hoc signing is only a warned fallback. Current options are:
 
 - Developer ID + Hardened Runtime + notarization: best technical fit.
 - Homebrew Cask: a later delivery channel for the same signed artifact.

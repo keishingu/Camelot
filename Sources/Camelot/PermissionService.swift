@@ -1,4 +1,5 @@
 import ApplicationServices
+import Carbon
 import CoreGraphics
 
 struct PermissionSnapshot: Equatable {
@@ -7,6 +8,10 @@ struct PermissionSnapshot: Equatable {
 }
 
 enum PermissionService {
+  static var isSecureInputEnabled: Bool {
+    IsSecureEventInputEnabled()
+  }
+
   static var current: PermissionSnapshot {
     PermissionSnapshot(
       accessibility: AXIsProcessTrusted(),

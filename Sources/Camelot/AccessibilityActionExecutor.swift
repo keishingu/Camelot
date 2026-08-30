@@ -30,16 +30,17 @@ final class AccessibilityActionExecutor {
 
   func execute(
     _ candidate: AccessibilityCandidate,
-    completion: @escaping (Result<Void, AccessibilityExecutionError>) -> Void
+    completion: @escaping (Result<Void, AccessibilityExecutionError>, String) -> Void
   ) {
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == candidate.pid else {
-      completion(.failure(.applicationChanged))
+      completion(.failure(.applicationChanged), staticDiagnostics(for: candidate))
       return
     }
 
     queue.async {
+      let diagnostics = self.diagnostics(for: candidate)
       let result = self.executeOnQueue(candidate)
-      DispatchQueue.main.async { completion(result) }
+      DispatchQueue.main.async { completion(result, diagnostics) }
     }
   }
 
@@ -122,6 +123,44 @@ final class AccessibilityActionExecutor {
       return nil
     }
     return CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
+  }
+
+  private func diagnostics(for candidate: AccessibilityCandidate) -> String {
+    var parts = [staticDiagnostics(for: candidate)]
+    appendAttribute(kAXRoleDescriptionAttribute, label: "roleDescription", from: candidate.element, to: &parts)
+    appendAttribute(kAXTitleAttribute, label: "title", from: candidate.element, to: &parts)
+    appendAttribute(kAXDescriptionAttribute, label: "description", from: candidate.element, to: &parts)
+    appendAttribute(kAXIdentifierAttribute, label: "identifier", from: candidate.element, to: &parts)
+    appendAttribute("AXDOMIdentifier", label: "domIdentifier", from: candidate.element, to: &parts)
+
+    var actionNames: CFArray?
+    if AXUIElementCopyActionNames(candidate.element, &actionNames) == .success,
+      let names = actionNames as? [String], !names.isEmpty
+    {
+      parts.append("actions=\(names.joined(separator: ","))")
+    }
+    return parts.joined(separator: " · ")
+  }
+
+  private func staticDiagnostics(for candidate: AccessibilityCandidate) -> String {
+    var parts = [candidate.role]
+    if let subrole = candidate.subrole, !subrole.isEmpty { parts.append("subrole=\(subrole)") }
+    parts.append("action=\(candidate.action.rawValue)")
+    return parts.joined(separator: " · ")
+  }
+
+  private func appendAttribute(
+    _ name: String,
+    label: String,
+    from element: AXUIElement,
+    to parts: inout [String]
+  ) {
+    guard let rawValue = attribute(name, from: element) else { return }
+    let value = String(describing: rawValue)
+      .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else { return }
+    parts.append("\(label)=\(String(value.prefix(80)))")
   }
 
   private func elementAttribute(

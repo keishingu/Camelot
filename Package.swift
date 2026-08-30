@@ -19,13 +19,14 @@ let package = Package(
       linkerSettings: [
         .linkedFramework("AppKit"),
         .linkedFramework("ApplicationServices"),
+        .linkedFramework("Carbon"),
         .linkedFramework("CoreGraphics"),
         .linkedFramework("SwiftUI"),
       ]
     ),
     .testTarget(
       name: "CamelotCoreTests",
-      dependencies: ["CamelotCore"]
+      dependencies: ["CamelotCore", "Camelot"]
     ),
   ],
   swiftLanguageModes: [.v5]

@@ -6,6 +6,10 @@
   <string>Camelot</string>
   <key>CFBundleExecutable</key>
   <string>Camelot</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>com.keishingu.camelot</string>
   <key>CFBundleInfoDictionaryVersion</key>

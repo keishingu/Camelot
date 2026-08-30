@@ -13,6 +13,13 @@ app_path="$package_root/.build/Camelot.app"
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$binary_path" "$app_path/Contents/MacOS/Camelot"
 cp "$package_root/AppResources/Info.plist" "$app_path/Contents/Info.plist"
+xcrun actool \
+  "$package_root/AppResources/Assets.xcassets" \
+  --compile "$app_path/Contents/Resources" \
+  --platform macosx \
+  --minimum-deployment-target 26.0 \
+  --app-icon AppIcon \
+  --output-partial-info-plist "$package_root/.build/asset-info.plist"
 
 signing_identity="${CAMELOT_SIGNING_IDENTITY:-}"
 if [[ -z "$signing_identity" ]]; then

@@ -1,0 +1,48 @@
+name: Deploy Camelot landing page
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require main and public repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${GITHUB_REF}" != refs/heads/main ]]; then
+            echo "::error::Pages can only be deployed from main"
+            exit 1
+          fi
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .visibility)"
+          if [[ "${visibility}" != public ]]; then
+            echo "::error::This repository is ${visibility}; public LP deployment needs a public destination"
+            exit 1
+          fi
+          [[ -f docs/site/index.html ]] || {
+            echo "::error::docs/site/index.html is missing"
+            exit 1
+          }
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

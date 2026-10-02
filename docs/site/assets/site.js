@@ -10,7 +10,7 @@
       el.textContent = "Camelotをダウンロード";
     });
     document.querySelectorAll("[data-release-state]").forEach((el) => { el.textContent = "配布中"; });
-    document.querySelectorAll("[data-release-heading]").forEach((el) => { el.textContent = "Camelotをダウンロード。"; });
+    document.querySelectorAll("[data-release-heading]").forEach((el) => { el.textContent = "Camelotをダウンロード"; });
     document.querySelectorAll("[data-release-note]").forEach((el) => { el.textContent = `バージョン${RELEASE.version} · macOS 26以降 · Universal`; });
   }
 
@@ -33,7 +33,7 @@
   let resetTimer;
   let optionStartedAt = null;
 
-  function reset(message = "Optionキーを押すと、操作できる項目にヒントが表示されます。") {
+  function reset(message = "Optionを押すと、ボタンや入力欄に文字が表示されます。") {
     clearTimeout(resetTimer);
     prefix = "";
     active = false;
@@ -49,7 +49,7 @@
     active = true;
     demo.focus({ preventScroll: true });
     demo.dataset.state = "hints";
-    status.textContent = "文字を入力して候補を選びます。例: S、続けてDでSave。";
+    status.textContent = "S、Dの順に押すとSaveボタンを選べます。";
   }
 
   function choose(target) {
@@ -63,8 +63,8 @@
     if (input) {
       input.focus();
       input.select();
-      resetTimer = setTimeout(() => reset("入力欄にフォーカスしました。もう一度Optionを押すとデモを続けられます。"), 1300);
-      status.textContent = "Display nameにフォーカスしました。";
+      resetTimer = setTimeout(() => reset("入力欄に文字を入力できます。もう一度試すにはOptionを押してください。"), 1300);
+      status.textContent = "Display nameの入力欄を選びました。";
       return;
     }
     if (check) check.checked = !check.checked;

@@ -5,7 +5,7 @@ import Foundation
 
 @MainActor
 final class CamelotAppModel: ObservableObject {
-  @Published private(set) var permissions = PermissionService.current
+  @Published private(set) var permissions: PermissionSnapshot
   @Published private(set) var status = "Starting Camelot…"
   @Published private(set) var lastScan: AccessibilityScanResult?
   @Published private(set) var isScanning = false
@@ -23,16 +23,26 @@ final class CamelotAppModel: ObservableObject {
     let candidate: AccessibilityCandidate
   }
 
-  private let scanner = AccessibilityScanner()
+  private let scanner: any AccessibilityScanning
   private let executor = AccessibilityActionExecutor()
-  private let keyboardTrigger = KeyboardTriggerService()
+  private let keyboardTrigger: any KeyboardTriggering
   private let overlay = OverlayWindowController()
+  private let permissionSnapshot: () -> PermissionSnapshot
   private var sessionHints = [SessionHint]()
   private var scanGeneration = 0
   private var started = false
   private var cancellables = Set<AnyCancellable>()
 
-  init() {
+  init(
+    scanner: any AccessibilityScanning = AccessibilityScanner(),
+    keyboardTrigger: any KeyboardTriggering = KeyboardTriggerService(),
+    permissionSnapshot: @escaping () -> PermissionSnapshot = { PermissionService.current }
+  ) {
+    self.scanner = scanner
+    self.keyboardTrigger = keyboardTrigger
+    self.permissionSnapshot = permissionSnapshot
+    permissions = permissionSnapshot()
+
     keyboardTrigger.onOptionTap = { [weak self] in
       self?.showHints()
     }
@@ -76,12 +86,12 @@ final class CamelotAppModel: ObservableObject {
   func start() {
     guard !started else { return }
     started = true
-    permissions = PermissionService.current
+    permissions = permissionSnapshot()
     startKeyboardTriggerIfPossible()
   }
 
   func refreshPermissions() {
-    permissions = PermissionService.current
+    permissions = permissionSnapshot()
     let authorized = permissions.accessibility && permissions.inputMonitoring
     if !authorized {
       if isScanning || isHintModeActive {
@@ -123,13 +133,6 @@ final class CamelotAppModel: ObservableObject {
       status = "Input Monitoring is required before showing hints"
       return
     }
-    guard !PermissionService.isSecureInputEnabled else {
-      cancelHintSession(
-        message: "Secure Input is active; leave the secure text field and try again"
-      )
-      return
-    }
-
     cancelHintSession(message: nil)
     let generation = scanGeneration
     isScanning = true

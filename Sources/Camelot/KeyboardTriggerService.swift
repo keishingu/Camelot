@@ -1,8 +1,22 @@
+import AppKit
 import CamelotCore
 import CoreGraphics
 import Foundation
 
-final class KeyboardTriggerService {
+protocol KeyboardTriggering: AnyObject {
+  var onOptionTap: (() -> Void)? { get set }
+  var onHintCharacter: ((Character) -> Void)? { get set }
+  var onBackspace: (() -> Void)? { get set }
+  var onCancel: (() -> Void)? { get set }
+  var isRunning: Bool { get }
+
+  @discardableResult
+  func start() -> Bool
+  func stop()
+  func setHintModeActive(_ active: Bool)
+}
+
+final class KeyboardTriggerService: KeyboardTriggering {
   private final class TapRuntime {
     let tap: CFMachPort
     let source: CFRunLoopSource
@@ -101,6 +115,9 @@ final class KeyboardTriggerService {
   private static let rightOption: CGKeyCode = 61
   private static let escape: CGKeyCode = 53
   private static let delete: CGKeyCode = 51
+  private static let shortcutModifierFlags: CGEventFlags = [
+    .maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn,
+  ]
   private static let hintCharacters: [CGKeyCode: Character] = [
     0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
     8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
@@ -113,13 +130,25 @@ final class KeyboardTriggerService {
   var onBackspace: (() -> Void)?
   var onCancel: (() -> Void)?
 
+  private let isSecureInputEnabled: () -> Bool
   private let lifecycleLock = NSLock()
   private let runtimeLock = NSLock()
   private let inputStateLock = NSLock()
   private var runtime: TapRuntime?
+  private var localMonitor: Any?
+  private var optionPollTimer: Timer?
+  private var secureInputActive = false
+  private var optionPollInitialized = false
+  private var optionWasPressed = false
+  private var keyDownCount: UInt32 = 0
+  private var flagsChangedCount: UInt32 = 0
   private var tapDetector = OptionTapDetector()
   private var hintModeActive = false
   private var suppressedKeyCodes = Set<CGKeyCode>()
+
+  init(isSecureInputEnabled: @escaping () -> Bool = { PermissionService.isSecureInputEnabled }) {
+    self.isSecureInputEnabled = isSecureInputEnabled
+  }
 
   var isRunning: Bool {
     runtimeLock.lock()
@@ -133,6 +162,8 @@ final class KeyboardTriggerService {
     lifecycleLock.lock()
     defer { lifecycleLock.unlock() }
     stopRuntime()
+    removeLocalMonitor()
+    stopOptionPolling()
     resetInputState()
 
     let eventMask = [
@@ -185,6 +216,15 @@ final class KeyboardTriggerService {
       runtime.stop()
       return false
     }
+    localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) {
+      [weak self] event in
+      guard let self, self.isSecureInputEnabled(), let cgEvent = event.cgEvent else {
+        return event
+      }
+      let type: CGEventType = event.type == .keyDown ? .keyDown : .keyUp
+      return handle(type, event: cgEvent) ? nil : event
+    }
+    startOptionPolling()
     return true
   }
 
@@ -192,6 +232,8 @@ final class KeyboardTriggerService {
     lifecycleLock.lock()
     defer { lifecycleLock.unlock() }
     stopRuntime()
+    removeLocalMonitor()
+    stopOptionPolling()
     resetInputState()
   }
 
@@ -208,7 +250,9 @@ final class KeyboardTriggerService {
   }
 
   func handle(_ type: CGEventType, event: CGEvent) -> Bool {
+    let secureInputEnabled = isSecureInputEnabled()
     inputStateLock.lock()
+    updateSecureInputStateLocked(secureInputEnabled)
     let decision = decide(type, event: event)
     inputStateLock.unlock()
 
@@ -248,6 +292,7 @@ final class KeyboardTriggerService {
       tapDetector.cancel()
       return EventDecision(consume: false)
     }
+    guard !secureInputActive else { return EventDecision(consume: false) }
 
     let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
     guard keyCode == Self.leftOption || keyCode == Self.rightOption else {
@@ -261,6 +306,49 @@ final class KeyboardTriggerService {
       return EventDecision(consume: false, notification: .optionTap)
     }
     return EventDecision(consume: false)
+  }
+
+  func sampleOptionState(
+    secureInputEnabled: Bool,
+    flags: CGEventFlags,
+    keyDownCount: UInt32,
+    flagsChangedCount: UInt32,
+    timestamp: UInt64
+  ) {
+    inputStateLock.lock()
+    updateSecureInputStateLocked(secureInputEnabled)
+    var notification: Notification?
+    if secureInputActive {
+      let flags = flags.intersection(Self.shortcutModifierFlags)
+      let isDown = flags.contains(.maskAlternate)
+      if optionPollInitialized, !hintModeActive {
+        let primaryModifierChanges = isDown == optionWasPressed ? 0 : 1
+        let additionalInput = keyDownCount != self.keyDownCount
+          || flags != (isDown ? .maskAlternate : [])
+          || flagsChangedCount &- self.flagsChangedCount > primaryModifierChanges
+        if additionalInput {
+          tapDetector.cancel()
+        } else if isDown != optionWasPressed,
+          tapDetector.optionChanged(.left, isDown: isDown, timestamp: timestamp)
+        {
+          notification = .optionTap
+        }
+      }
+      optionWasPressed = isDown
+      self.keyDownCount = keyDownCount
+      self.flagsChangedCount = flagsChangedCount
+      optionPollInitialized = true
+    }
+    inputStateLock.unlock()
+    deliver(notification)
+  }
+
+  private func updateSecureInputStateLocked(_ enabled: Bool) {
+    guard secureInputActive != enabled else { return }
+    secureInputActive = enabled
+    // A gesture must finish using the same input source that observed its press.
+    tapDetector.cancel()
+    optionPollInitialized = false
   }
 
   private func decideHintMode(_ type: CGEventType, event: CGEvent) -> EventDecision {
@@ -318,10 +406,48 @@ final class KeyboardTriggerService {
     runtime?.stop()
   }
 
+  private func removeLocalMonitor() {
+    guard let localMonitor else { return }
+    NSEvent.removeMonitor(localMonitor)
+    self.localMonitor = nil
+  }
+
+  private func startOptionPolling() {
+    pollOptionState()
+
+    let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+      self?.pollOptionState()
+    }
+    timer.tolerance = 0.005
+    optionPollTimer = timer
+    RunLoop.main.add(timer, forMode: .common)
+  }
+
+  private func stopOptionPolling() {
+    optionPollTimer?.invalidate()
+    optionPollTimer = nil
+  }
+
+  private func pollOptionState() {
+    let secureInputEnabled = isSecureInputEnabled()
+    sampleOptionState(
+      secureInputEnabled: secureInputEnabled,
+      flags: secureInputEnabled ? CGEventSource.flagsState(.combinedSessionState) : [],
+      keyDownCount: secureInputEnabled
+        ? CGEventSource.counterForEventType(.combinedSessionState, eventType: .keyDown) : 0,
+      flagsChangedCount: secureInputEnabled
+        ? CGEventSource.counterForEventType(.combinedSessionState, eventType: .flagsChanged) : 0,
+      timestamp: UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000_000)
+    )
+  }
+
   private func resetInputState() {
     inputStateLock.lock()
     hintModeActive = false
     suppressedKeyCodes.removeAll()
+    secureInputActive = false
+    optionPollInitialized = false
+    optionWasPressed = false
     tapDetector.cancel()
     inputStateLock.unlock()
   }

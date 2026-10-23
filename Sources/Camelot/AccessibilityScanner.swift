@@ -31,7 +31,13 @@ struct AccessibilityScanResult: Sendable {
   let reachedSafetyLimit: Bool
 }
 
-final class AccessibilityScanner {
+protocol AccessibilityScanning {
+  func scanFrontmostApplication(
+    completion: @escaping (Result<AccessibilityScanResult, ScanError>) -> Void
+  )
+}
+
+final class AccessibilityScanner: AccessibilityScanning {
   private struct Request {
     let pid: pid_t
     let applicationName: String
